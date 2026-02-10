@@ -14,7 +14,8 @@ def extract_zones(image_path: str) -> list[str]:
     """Extract white text lines from a stock chart image.
 
     Preprocesses the image to isolate white/near-white text, then uses
-    Tesseract OCR to read the text.
+    Tesseract OCR to read the text. Works with both full chart screenshots
+    and cropped text-only images.
     """
     img = cv2.imread(image_path)
     if img is None:
@@ -28,7 +29,7 @@ def extract_zones(image_path: str) -> list[str]:
     sat = hsv[:, :, 1]
 
     # Use high brightness threshold for clean text extraction
-    white_mask = ((val > 220) & (sat < 40)).astype(np.uint8) * 255
+    white_mask = ((val > 200) & (sat < 40)).astype(np.uint8) * 255
 
     # Remove horizontal grid lines
     horiz_kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (60, 1))
@@ -40,15 +41,21 @@ def extract_zones(image_path: str) -> list[str]:
     vert_lines = cv2.morphologyEx(white_mask, cv2.MORPH_OPEN, vert_kernel)
     white_mask = cv2.subtract(white_mask, vert_lines)
 
-    # Crop to the text region (right portion, skip toolbar)
-    x_start = int(w * 0.50)
-    x_end = int(w * 0.96)
-    y_start = int(h * 0.01)
-    y_end = int(h * 0.96)
-    region = white_mask[y_start:y_end, x_start:x_end]
+    # Adaptive crop: only crop if image is a full chart (wide aspect ratio)
+    if w > 1000:
+        # Full chart screenshot - crop to text region on the right
+        x_start = int(w * 0.50)
+        x_end = int(w * 0.96)
+        y_start = int(h * 0.01)
+        y_end = int(h * 0.96)
+        region = white_mask[y_start:y_end, x_start:x_end]
+    else:
+        # Already cropped to text - use full image
+        region = white_mask
+
     rh, rw = region.shape
 
-    # Scale up 4x
+    # Scale up for better OCR accuracy
     scale = 4
     scaled = cv2.resize(region, (rw * scale, rh * scale), interpolation=cv2.INTER_CUBIC)
     _, scaled = cv2.threshold(scaled, 127, 255, cv2.THRESH_BINARY)
@@ -108,13 +115,15 @@ def _clean_line(line: str) -> str:
     line = re.sub(r"\bRanae\b", "Range", line)
     line = re.sub(r"\bKange\b", "Range", line)
     line = re.sub(r"\bRanaea\b", "Range", line)
-    line = re.sub(r"\bRanges?\s+E", "Range E", line)  # extra s
+    line = re.sub(r"\bPanne\b", "Range", line)
 
     # Fix garbled "Exhaustion" variants
     for pattern in [
         r"Evhauetinn", r"Exnaustion", r"Frhaustian", r"CAnausuon",
         r"CAnaustion", r"CANausiCn", r"CANaUuSIVN", r"Fehaustion",
-        r"Frhaustinn", r"Exnausuon", r"Fxhaustion",
+        r"Frhaustinn", r"Exnausuon", r"Fxhaustion", r"Exharietian",
+        r"Fxhaustian", r"Exnaustian", r"CANaustOn", r"Fxhaiuetian",
+        r"Frhaistian",
     ]:
         line = re.sub(rf"\b{pattern}\b", "Exhaustion", line, flags=re.IGNORECASE)
 
@@ -131,6 +140,11 @@ def _clean_line(line: str) -> str:
     line = line.replace("Cnanging", "Changing")
     line = line.replace("Chanaina", "Changing")
     line = line.replace("Channing", "Changing")
+    line = line.replace("Channina", "Changing")
+    line = line.replace("Chanaing", "Changing")
+
+    # Fix "Sianals" -> "Signals"
+    line = line.replace("Sianals", "Signals")
 
     # Fix "Zone)" ending variants (only at end of parenthetical expression)
     line = re.sub(
@@ -140,6 +154,11 @@ def _clean_line(line: str) -> str:
     )
     line = re.sub(
         r"\(([^)]*(?:Confirming|Changing|Weakness|Strength))\s+[Zz]cne\)?\s*$",
+        r"(\1 Zone)",
+        line,
+    )
+    line = re.sub(
+        r"\(([^)]*(?:Confirming|Changing|Weakness|Strength))\s+[Zz]ane\)?\s*$",
         r"(\1 Zone)",
         line,
     )
